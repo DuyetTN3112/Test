@@ -1,22 +1,82 @@
+require('dotenv').config();
 const express = require('express');
-const mysql = require('mysql2/promise'); // Sử dụng promise interface
+const { Sequelize, DataTypes } = require('sequelize');
 const app = express();
-const PORT = 3000;
+
 
 app.use(express.json());
 
-// Cấu hình kết nối MySQL
-const dbConfig = {
-  host: 'localhost',
-  user: 'root', 
-  password: '', 
-  database: 'test'
-};
+const sequelize = new Sequelize(
+  process.env.DB_NAME,
+  process.env.DB_USER,
+  process.env.DB_PASSWORD,
+  {
+    host: process.env.DB_HOST,
+    dialect: process.env.DB_DIALECT,
+    logging: false // Tắt log SQL để dễ theo dõi
+  }
+);
 
-// Middleware kết nối database
+// Định nghĩa model Student
+const Student = sequelize.define('Student', {
+  id: {
+    type: DataTypes.INTEGER,
+    primaryKey: true,
+    autoIncrement: true
+  },
+  name: {
+    type: DataTypes.STRING,
+    allowNull: false,
+    validate: {
+      notEmpty: {
+        msg: 'Tên không được để trống'
+      },
+      len: {
+        args: [2, 50],
+        msg: 'Tên phải có từ 2 đến 50 ký tự'
+      }
+    }
+  },
+  email: {
+    type: DataTypes.STRING,
+    allowNull: false,
+    unique: true,
+    validate: {
+      isEmail: {
+        msg: 'Email không hợp lệ'
+      },
+      notEmpty: {
+        msg: 'Email không được để trống'
+      }
+    }
+  },
+  gpa: {
+    type: DataTypes.FLOAT,
+    allowNull: false,
+    validate: {
+      min: {
+        args: [0],
+        msg: 'GPA không thể nhỏ hơn 0'
+      },
+      max: {
+        args: [4],
+        msg: 'GPA không thể lớn hơn 4'
+      },
+      notNull: {
+        msg: 'GPA không được để trống'
+      }
+    }
+  }
+}, {
+  tableName: 'students',
+  timestamps: false // Tắt tự động thêm createdAt và updatedAt
+});
+
+// Middleware kết nối database và đồng bộ model
 app.use(async (req, res, next) => {
   try {
-    req.db = await mysql.createConnection(dbConfig);
+    await sequelize.authenticate();
+    await Student.sync(); // Đảm bảo bảng tồn tại
     next();
   } catch (err) {
     console.error('Database connection error:', err);
@@ -24,90 +84,102 @@ app.use(async (req, res, next) => {
   }
 });
 
-// Đóng kết nối sau mỗi request
-app.use((req, res, next) => {
-  res.on('finish', () => {
-    if (req.db) req.db.end();
-  });
-  next();
-});
-
-// Route GET /students-from-db
-app.get('/students-from-db', async (req, res) => {
+// Route GET /students
+app.get('/students', async (req, res) => {
   try {
-    const [rows] = await req.db.query('SELECT * FROM students');
-    res.json(rows);
+    const students = await Student.findAll();
+    res.json(students);
   } catch (err) {
     console.error('Database query error:', err);
     res.status(500).json({ error: 'Failed to fetch students' });
   }
 });
 
-// Các route cũ vẫn giữ nguyên
-app.get('/students', (req, res) => {
-  res.json(students);
+// Route POST /students - Thêm mới sinh viên
+app.post('/students', async (req, res) => {
+  try {
+    const { name, email, gpa } = req.body;
+    
+    // Sequelize sẽ tự động validate dữ liệu
+    const newStudent = await Student.create({
+      name,
+      email,
+      gpa: parseFloat(gpa)
+    });
+    
+    res.status(201).json(newStudent);
+  } catch (err) {
+    if (err.name === 'SequelizeValidationError' || err.name === 'SequelizeUniqueConstraintError') {
+      const errors = err.errors.map(e => ({
+        field: e.path,
+        message: e.message
+      }));
+      return res.status(400).json({ errors });
+    }
+    console.error('Database error:', err);
+    res.status(500).json({ error: 'Failed to create student' });
+  }
 });
 
-// 2. Route POST /students - Thêm mới sinh viên
-app.post('/students', (req, res) => {
-  const { name, email, gpa } = req.body;
-  
-  const newStudent = {
-    id: students.length > 0 ? Math.max(...students.map(s => s.id)) + 1 : 1,
-    name,
-    email,
-    gpa: parseFloat(gpa)
-  };
-  
-  const validationErrors = validateStudent(newStudent);
-  if (validationErrors.length > 0) {
-    return res.status(400).json({ errors: validationErrors });
+// Route PUT /students/:id - Cập nhật sinh viên
+app.put('/students/:id', async (req, res) => {
+  try {
+    const id = req.params.id;
+    const { name, email, gpa } = req.body;
+    
+    const student = await Student.findByPk(id);
+    if (!student) {
+      return res.status(404).json({ message: 'Không tìm thấy sinh viên' });
+    }
+    
+    // Cập nhật và validate
+    await student.update({
+      name,
+      email,
+      gpa: parseFloat(gpa)
+    });
+    
+    res.json(student);
+  } catch (err) {
+    if (err.name === 'SequelizeValidationError' || err.name === 'SequelizeUniqueConstraintError') {
+      const errors = err.errors.map(e => ({
+        field: e.path,
+        message: e.message
+      }));
+      return res.status(400).json({ errors });
+    }
+    console.error('Database error:', err);
+    res.status(500).json({ error: 'Failed to update student' });
   }
-  
-  students.push(newStudent);
-  res.status(201).json(newStudent);
 });
 
-// 3. Route PUT /students/:id - Cập nhật sinh viên
-app.put('/students/:id', (req, res) => {
-  const id = parseInt(req.params.id);
-  const { name, email, gpa } = req.body;
-  
-  const studentIndex = students.findIndex(s => s.id === id);
-  if (studentIndex === -1) {
-    return res.status(404).json({ message: 'Không tìm thấy sinh viên' });
+// Route DELETE /students/:id - Xóa sinh viên
+app.delete('/students/:id', async (req, res) => {
+  try {
+    const id = req.params.id;
+    
+    const student = await Student.findByPk(id);
+    if (!student) {
+      return res.status(404).json({ message: 'Không tìm thấy sinh viên' });
+    }
+    
+    await student.destroy();
+    res.json({ message: 'Xóa sinh viên thành công', student });
+  } catch (err) {
+    console.error('Database error:', err);
+    res.status(500).json({ error: 'Failed to delete student' });
   }
-  
-  const updatedStudent = {
-    id,
-    name,
-    email,
-    gpa: parseFloat(gpa)
-  };
-  
-  const validationErrors = validateStudent(updatedStudent);
-  if (validationErrors.length > 0) {
-    return res.status(400).json({ errors: validationErrors });
-  }
-  
-  students[studentIndex] = updatedStudent;
-  res.json(updatedStudent);
-});
-
-// 4. Route DELETE /students/:id - Xóa sinh viên
-app.delete('/students/:id', (req, res) => {
-  const id = parseInt(req.params.id);
-  
-  const studentIndex = students.findIndex(s => s.id === id);
-  if (studentIndex === -1) {
-    return res.status(404).json({ message: 'Không tìm thấy sinh viên' });
-  }
-  
-  const deletedStudent = students.splice(studentIndex, 1)[0];
-  res.json({ message: 'Xóa sinh viên thành công', student: deletedStudent });
 });
 
 // Khởi động server
-app.listen(PORT, () => {
-  console.log(`Server đang chạy tại http://localhost:${PORT}`);
+// Sử dụng port từ .env hoặc mặc định là 3000 nếu không có
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, async () => {
+  try {
+    await sequelize.authenticate();
+    console.log(`Server đang chạy tại http://localhost:${PORT}`);
+  } catch (err) {
+    console.error('Không thể kết nối database:', err);
+  }
 });
